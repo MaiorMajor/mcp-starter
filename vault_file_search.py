@@ -79,10 +79,6 @@ def search_files(vault: Path, params: FindFilesParams) -> dict:
                 "count": 0,
             }
         target_exts = (target_exts or set()) | type_exts
-    if params.exclude_md:
-        if target_exts is None:
-            target_exts = set()
-        target_exts.discard(".md")
 
     today_start = datetime.combine(date.today(), datetime.min.time())
     yesterday_start = today_start - timedelta(days=1)
@@ -143,7 +139,8 @@ def search_files(vault: Path, params: FindFilesParams) -> dict:
                 continue
 
             mtime = datetime.fromtimestamp(st.st_mtime)
-            ctime = datetime.fromtimestamp(st.st_ctime)
+            ctime_ts = getattr(st, "st_birthtime", st.st_ctime)
+            ctime = datetime.fromtimestamp(ctime_ts)
 
             if modified_after and mtime < modified_after:
                 continue
@@ -164,7 +161,7 @@ def search_files(vault: Path, params: FindFilesParams) -> dict:
                 "ext": ext,
                 "size_bytes": st.st_size,
                 "modified": mtime.strftime("%Y-%m-%dT%H:%M:%S"),
-                "created": ctime.strftime("%Y-%m-%dT%H:%M:%S"),
+                "ctime": ctime.strftime("%Y-%m-%dT%H:%M:%S"),
             })
 
     use_created = params.today or params.yesterday or bool(created_after)
@@ -175,7 +172,7 @@ def search_files(vault: Path, params: FindFilesParams) -> dict:
     elif sort_key == "size":
         results.sort(key=lambda r: r["size_bytes"], reverse=True)
     elif sort_key == "created":
-        results.sort(key=lambda r: r["created"], reverse=True)
+        results.sort(key=lambda r: r["ctime"], reverse=True)
     else:
         results.sort(key=lambda r: r["modified"], reverse=True)
 

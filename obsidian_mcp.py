@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MCP Server for Obsidian Vault with OAuth 2.0 PKCE (single-user)
-Stack: Starlette + uvicorn + sse-starlette + authlib
+Stack: Starlette + uvicorn + sse-starlette
 
 Environment variables (loaded from .env next to this file):
   MCP_API_KEY      – static API key accepted as Bearer token
@@ -31,6 +31,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import html
 import importlib.util
 import json
 import logging
@@ -45,8 +46,10 @@ from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from zoneinfo import ZoneInfo
+
+import vault_security as vsec
 
 import uvicorn
 from dotenv import load_dotenv
@@ -74,6 +77,11 @@ OAUTH_PASSWORD: str = os.getenv("OAUTH_PASSWORD", "")
 JWT_SECRET: str = os.getenv("JWT_SECRET", "change-me-in-production")
 BASE_URL: str = os.getenv("MCP_BASE_URL", "https://your-domain.com").rstrip("/")
 SKILLS_ROOT: Path = REPO_ROOT / "skills"
+ACCESS_TOKEN_TTL: int = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "900"))  # 15 min
+REFRESH_TOKEN_TTL: int = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(30 * 24 * 3600)))
+OAUTH_CLIENTS_FILE: Path = Path(os.getenv("OAUTH_CLIENTS_FILE", str(REPO_ROOT / "oauth_clients.json")))
+OAUTH_RATE_LIMIT: int = int(os.getenv("OAUTH_RATE_LIMIT", "30"))
+OAUTH_RATE_WINDOW: int = int(os.getenv("OAUTH_RATE_WINDOW_SECONDS", "300"))
 SERVER_VERSION: str = "1.12.0"
 SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = ("2025-03-26", "2024-11-05")
 PROTECTED_METHODS: set[str] = {"tools/call"}
@@ -161,34 +169,122 @@ def _log_tool_call(tool_name: str, result: Any) -> None:
     _logger.info("mcp_tool_call tool=%s bytes=%s truncated=%s", tool_name, nbytes, truncated)
 
 
-# ─── Persistent refresh token store ──────────────────────────────────────────
+# ─── Persistent stores (atomic JSON writes) ───────────────────────────────────
 
 TOKENS_FILE: Path = Path(os.getenv("TOKENS_FILE", str(REPO_ROOT / "refresh_tokens.json")))
+_oauth_rate_hits: dict[str, list[float]] = {}
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _load_json_store(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def _load_refresh_tokens() -> dict[str, dict]:
-    if TOKENS_FILE.exists():
-        try:
-            data = json.loads(TOKENS_FILE.read_text(encoding="utf-8"))
-            # Prune expired tokens on load
-            now = time.time()
-            return {k: v for k, v in data.items() if v.get("expires", 0) > now}
-        except Exception:
-            pass
-    return {}
+    data = _load_json_store(TOKENS_FILE)
+    now = time.time()
+    return {k: v for k, v in data.items() if isinstance(v, dict) and v.get("expires", 0) > now}
 
 
 def _save_refresh_tokens(tokens: dict[str, dict]) -> None:
     try:
-        TOKENS_FILE.write_text(json.dumps(tokens), encoding="utf-8")
-    except Exception:
+        _atomic_write_json(TOKENS_FILE, tokens)
+    except OSError:
         pass
+
+
+def _load_oauth_clients() -> dict[str, dict]:
+    clients = _load_json_store(OAUTH_CLIENTS_FILE)
+    # Bootstrap from env for local dev (exact redirect URIs, comma-separated)
+    bootstrap = os.getenv("OAUTH_REDIRECT_URIS", "").strip()
+    if bootstrap and not clients:
+        uris = [u.strip() for u in bootstrap.split(",") if u.strip()]
+        if uris:
+            clients = {
+                "mcp-starter-local": {
+                    "redirect_uris": uris,
+                    "created_at": time.time(),
+                }
+            }
+            try:
+                _atomic_write_json(OAUTH_CLIENTS_FILE, clients)
+            except OSError:
+                pass
+    return clients
+
+
+def _save_oauth_clients(clients: dict[str, dict]) -> None:
+    try:
+        _atomic_write_json(OAUTH_CLIENTS_FILE, clients)
+    except OSError:
+        pass
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _rate_limit(request: Request, bucket: str) -> bool:
+    key = f"{bucket}:{_client_ip(request)}"
+    now = time.time()
+    window = float(OAUTH_RATE_WINDOW)
+    hits = [t for t in _oauth_rate_hits.get(key, []) if now - t < window]
+    if len(hits) >= OAUTH_RATE_LIMIT:
+        return False
+    hits.append(now)
+    _oauth_rate_hits[key] = hits
+    return True
+
+
+def _escape_html(value: str) -> str:
+    return html.escape(value, quote=True)
+
+
+def _validate_redirect_uri(redirect_uri: str) -> str | None:
+    if not redirect_uri:
+        return "redirect_uri is required"
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme not in ("http", "https"):
+        return "redirect_uri must use http or https"
+    if not parsed.netloc:
+        return "redirect_uri must include a host"
+    if parsed.fragment:
+        return "redirect_uri must not include a fragment"
+    return None
+
+
+def _lookup_client(client_id: str) -> dict | None:
+    if not client_id:
+        return None
+    return _load_oauth_clients().get(client_id)
+
+
+def _redirect_uri_allowed(client: dict, redirect_uri: str) -> bool:
+    allowed = client.get("redirect_uris") or []
+    return redirect_uri in allowed
 
 
 # ─── In-memory stores ─────────────────────────────────────────────────────────
 
 auth_codes: dict[str, dict] = {}
 refresh_tokens: dict[str, dict] = _load_refresh_tokens()
+oauth_clients: dict[str, dict] = _load_oauth_clients()
 _sse_queues: dict[str, asyncio.Queue] = {}
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
@@ -202,8 +298,9 @@ def create_access_token(sub: str = "user") -> str:
     payload = {
         "sub": sub,
         "iat": now,
-        "exp": now + 30 * 24 * 3600,
+        "exp": now + ACCESS_TOKEN_TTL,
         "type": "access",
+        "aud": BASE_URL,
     }
     return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
@@ -212,7 +309,7 @@ def create_refresh_token() -> str:
     token = secrets.token_urlsafe(64)
     refresh_tokens[token] = {
         "issued_at": time.time(),
-        "expires": time.time() + 30 * 24 * 3600,
+        "expires": time.time() + REFRESH_TOKEN_TTL,
     }
     _save_refresh_tokens(refresh_tokens)
     return token
@@ -220,19 +317,23 @@ def create_refresh_token() -> str:
 
 def verify_access_token(token: str) -> Optional[dict]:
     try:
-        return pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return pyjwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+            audience=BASE_URL,
+            options={"require": ["exp", "aud"]},
+        )
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
         return None
 
 
 def pkce_verify(code_verifier: str, code_challenge: str, method: str) -> bool:
-    if method == "S256":
-        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-        expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-        return secrets.compare_digest(expected, code_challenge)
-    if method == "plain":
-        return secrets.compare_digest(code_verifier, code_challenge)
-    return False
+    if method != "S256":
+        return False
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return secrets.compare_digest(expected, code_challenge)
 
 
 def get_bearer_token(request: Request) -> Optional[str]:
@@ -334,6 +435,7 @@ AUTHORIZE_HTML = """\
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'">
   <title>MCP Obsidian – Authorize</title>
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -382,19 +484,78 @@ AUTHORIZE_HTML = """\
 </html>"""
 
 
+def _authorize_form_context(
+    *,
+    code_challenge: str,
+    code_challenge_method: str,
+    redirect_uri: str,
+    client_id: str,
+    state: str,
+    error: str = "",
+) -> dict[str, str]:
+    return {
+        "code_challenge": _escape_html(code_challenge),
+        "code_challenge_method": _escape_html(code_challenge_method),
+        "redirect_uri": _escape_html(redirect_uri),
+        "client_id": _escape_html(client_id),
+        "state": _escape_html(state),
+        "error": error,
+    }
+
+
+def _validate_authorize_params(
+    client_id: str,
+    redirect_uri: str,
+    code_challenge: str,
+    code_challenge_method: str,
+    state: str,
+) -> str | None:
+    if not state:
+        return "state is required"
+    if not code_challenge:
+        return "code_challenge is required"
+    if code_challenge_method != "S256":
+        return "Only S256 PKCE is supported"
+    uri_err = _validate_redirect_uri(redirect_uri)
+    if uri_err:
+        return uri_err
+    client = _lookup_client(client_id)
+    if client is None:
+        return "Unknown client_id — register via POST /register first"
+    if not _redirect_uri_allowed(client, redirect_uri):
+        return "redirect_uri not registered for this client"
+    return None
+
+
 async def authorize_get(request: Request) -> HTMLResponse:
+    if not _rate_limit(request, "authorize"):
+        return HTMLResponse("Too many requests", status_code=429)
     p = request.query_params
-    return HTMLResponse(AUTHORIZE_HTML.format(
+    ctx = _authorize_form_context(
         code_challenge=p.get("code_challenge", ""),
         code_challenge_method=p.get("code_challenge_method", "S256"),
         redirect_uri=p.get("redirect_uri", ""),
         client_id=p.get("client_id", ""),
         state=p.get("state", ""),
-        error="",
-    ))
+    )
+    err = _validate_authorize_params(
+        p.get("client_id", ""),
+        p.get("redirect_uri", ""),
+        p.get("code_challenge", ""),
+        p.get("code_challenge_method", "S256"),
+        p.get("state", ""),
+    )
+    if err:
+        ctx["error"] = f'<p class="err">{_escape_html(err)}</p>'
+    return HTMLResponse(
+        AUTHORIZE_HTML.format(**ctx),
+        headers={"X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"},
+    )
 
 
 async def authorize_post(request: Request) -> Response:
+    if not _rate_limit(request, "authorize"):
+        return HTMLResponse("Too many requests", status_code=429)
     form = await request.form()
     password              = str(form.get("password", ""))
     code_challenge        = str(form.get("code_challenge", ""))
@@ -403,38 +564,44 @@ async def authorize_post(request: Request) -> Response:
     client_id             = str(form.get("client_id", ""))
     state                 = str(form.get("state", ""))
 
+    ctx = _authorize_form_context(
+        code_challenge=code_challenge,
+        code_challenge_method=code_challenge_method,
+        redirect_uri=redirect_uri,
+        client_id=client_id,
+        state=state,
+    )
+    security_headers = {"X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"}
+
+    param_err = _validate_authorize_params(
+        client_id, redirect_uri, code_challenge, code_challenge_method, state,
+    )
+    if param_err:
+        ctx["error"] = f'<p class="err">{_escape_html(param_err)}</p>'
+        return HTMLResponse(AUTHORIZE_HTML.format(**ctx), status_code=400, headers=security_headers)
+
     if not verify_password(password):
-        error_html = '<p class="err">Invalid password. Please try again.</p>'
-        return HTMLResponse(
-            AUTHORIZE_HTML.format(
-                code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method,
-                redirect_uri=redirect_uri,
-                client_id=client_id,
-                state=state,
-                error=error_html,
-            ),
-            status_code=401,
-        )
+        ctx["error"] = '<p class="err">Invalid password. Please try again.</p>'
+        return HTMLResponse(AUTHORIZE_HTML.format(**ctx), status_code=401, headers=security_headers)
 
     code = secrets.token_urlsafe(32)
     auth_codes[code] = {
         "challenge": code_challenge,
-        "method": code_challenge_method,
+        "method": "S256",
         "redirect_uri": redirect_uri,
         "client_id": client_id,
         "state": state,
         "expires": time.time() + 300,
     }
 
-    params = {"code": code}
-    if state:
-        params["state"] = state
+    params = {"code": code, "state": state}
     return RedirectResponse(f"{redirect_uri}?{urlencode(params)}", status_code=302)
 
 
 async def token_endpoint(request: Request) -> JSONResponse:
     """Unified token endpoint — handles authorization_code AND refresh_token (RFC 6749)."""
+    if not _rate_limit(request, "token"):
+        return JSONResponse({"error": "slow_down", "error_description": "Rate limit exceeded"}, status_code=429)
     try:
         body = await request.json()
     except Exception:
@@ -445,6 +612,12 @@ async def token_endpoint(request: Request) -> JSONResponse:
             return JSONResponse({"error": "invalid_request", "error_description": "Body must be JSON or form-encoded"}, status_code=400)
 
     grant_type = body.get("grant_type", "")
+    resource = body.get("resource", "")
+    if resource and resource.rstrip("/") != BASE_URL:
+        return JSONResponse(
+            {"error": "invalid_request", "error_description": "resource does not match this MCP server"},
+            status_code=400,
+        )
 
     # ── Refresh token grant ───────────────────────────────────────────────────
     if grant_type == "refresh_token":
@@ -458,7 +631,7 @@ async def token_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({
             "access_token":  new_access,
             "token_type":    "Bearer",
-            "expires_in":    30 * 24 * 3600,
+            "expires_in":    ACCESS_TOKEN_TTL,
             "refresh_token": new_refresh,
             "scope":         "mcp",
         })
@@ -470,14 +643,20 @@ async def token_endpoint(request: Request) -> JSONResponse:
     code          = body.get("code", "")
     code_verifier = body.get("code_verifier", "")
     redirect_uri  = body.get("redirect_uri", "")
+    client_id     = body.get("client_id", "")
 
     record = auth_codes.pop(code, None)
     if not record:
         return JSONResponse({"error": "invalid_grant", "error_description": "Unknown or expired code"}, status_code=400)
     if time.time() > record["expires"]:
         return JSONResponse({"error": "invalid_grant", "error_description": "Code expired"}, status_code=400)
-    if record["redirect_uri"] and record["redirect_uri"] != redirect_uri:
+    if record.get("client_id") != client_id:
+        return JSONResponse({"error": "invalid_grant", "error_description": "client_id mismatch"}, status_code=400)
+    if record["redirect_uri"] != redirect_uri:
         return JSONResponse({"error": "invalid_grant", "error_description": "redirect_uri mismatch"}, status_code=400)
+    client = _lookup_client(client_id)
+    if client is None or not _redirect_uri_allowed(client, redirect_uri):
+        return JSONResponse({"error": "invalid_grant", "error_description": "Invalid client or redirect_uri"}, status_code=400)
     if not pkce_verify(code_verifier, record["challenge"], record["method"]):
         return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
 
@@ -487,13 +666,15 @@ async def token_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({
         "access_token":  access_token,
         "token_type":    "Bearer",
-        "expires_in":    30 * 24 * 3600,
+        "expires_in":    ACCESS_TOKEN_TTL,
         "refresh_token": refresh_token,
         "scope":         "mcp",
     })
 
 
 async def token_refresh_endpoint(request: Request) -> JSONResponse:
+    if not _rate_limit(request, "token"):
+        return JSONResponse({"error": "slow_down"}, status_code=429)
     try:
         body = await request.json()
     except Exception:
@@ -517,7 +698,7 @@ async def token_refresh_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({
         "access_token":  new_access,
         "token_type":    "Bearer",
-        "expires_in":    30 * 24 * 3600,
+        "expires_in":    ACCESS_TOKEN_TTL,
         "refresh_token": new_refresh,
         "scope":         "mcp",
     })
@@ -547,7 +728,6 @@ async def oauth_protected_resource_endpoint(request: Request) -> JSONResponse:
         "resource": BASE_URL,
         "authorization_servers": [BASE_URL],
         "bearer_methods_supported": ["header"],
-        "resource_signing_alg_values_supported": ["RS256"],
         "scopes_supported": ["mcp"],
     })
 
@@ -561,7 +741,7 @@ def _list_inbox() -> dict:
     truncated = False
     for f in sorted(inbox.rglob("*.md")):
         rel = str(f.relative_to(VAULT_PATH)).replace("\\", "/")
-        if "_PRIVADO" in rel:
+        if vsec.is_protected_resolved(VAULT_PATH, f.resolve()):
             continue
         files.append({"path": rel, "name": f.name})
         if len(files) >= LIST_INBOX_MAX:
@@ -581,13 +761,9 @@ def _list_inbox() -> dict:
 def _read_note(path: str) -> dict:
     if not path:
         return {"error": "path is required"}
-    note = VAULT_PATH / path
-    try:
-        note.resolve().relative_to(VAULT_PATH.resolve())
-    except ValueError:
-        return {"error": "Path traversal not allowed"}
-    if "_PRIVADO" in path:
-        return {"error": "Access denied: _PRIVADO/ contents are never exposed via MCP."}
+    note, err = vsec.resolve_under_vault(VAULT_PATH, path)
+    if err:
+        return {"error": err}
     if path.endswith("vault-graph.json") or path.endswith("99_meta/vault-graph.json"):
         return {"error": "vault-graph.json is ~800KB and would flood the context. Use run_skill('vault-graph', ['query', '<subcmd>', ...]) — subcmds: backlinks, forward, neighbors, hubs, orphans, tag, node, path, find, stats."}
     _BLOAT_WARN_PATHS = (
@@ -704,20 +880,15 @@ def _atomic_write_text(note: Path, content: str) -> None:
 
 def _note_path_error(path: str, *, write: bool = False) -> dict | None:
     """Return an error dict if path is invalid; None if OK."""
-    if not path:
-        return {"error": "path is required"}
-    note = VAULT_PATH / path
-    try:
-        note.resolve().relative_to(VAULT_PATH.resolve())
-    except ValueError:
-        return {"error": "Path traversal not allowed"}
-    if "_PRIVADO" in path:
-        msg = "write-protected" if write else "never exposed"
-        return {"error": f"Access denied: _PRIVADO/ is {msg} via MCP."}
+    resolved, err = vsec.resolve_under_vault(VAULT_PATH, path)
+    if err:
+        if write and "_PRIVADO" in err:
+            return {"error": "Access denied: _PRIVADO/ is write-protected via MCP."}
+        return {"error": err}
     if path.endswith("vault-graph.json") or path.endswith("99_meta/vault-graph.json"):
         return {
             "error": (
-                "vault-graph.json is ~800KB. Use run_skill('vault-graph', "
+                "vault-graph.json is large. Use run_skill('vault-graph', "
                 "['query', '<subcmd>', ...]) instead."
             )
         }
@@ -726,19 +897,13 @@ def _note_path_error(path: str, *, write: bool = False) -> dict | None:
 
 def _json_data_path_error(path: str) -> dict | None:
     """Return an error dict if path is invalid for read_json/read_jsonl; None if OK."""
-    if not path:
-        return {"error": "path is required"}
-    note = VAULT_PATH / path
-    try:
-        note.resolve().relative_to(VAULT_PATH.resolve())
-    except ValueError:
-        return {"error": "Path traversal not allowed"}
-    if "_PRIVADO" in path:
-        return {"error": "Access denied: _PRIVADO/ is never exposed via MCP."}
+    _, err = vsec.resolve_under_vault(VAULT_PATH, path)
+    if err:
+        return {"error": err}
     if path.endswith("vault-graph.json") or path.endswith("99_meta/vault-graph.json"):
         return {
             "error": (
-                "vault-graph.json is ~800KB. Use run_skill('vault-graph', "
+                "vault-graph.json is large. Use run_skill('vault-graph', "
                 "['query', '<subcmd>', ...]) instead."
             )
         }
@@ -803,15 +968,11 @@ def _extract_frontmatter(text: str) -> tuple[dict[str, Any], str | None]:
 
 def _write_note(path: str, content: str, mode: str = "upsert") -> dict:
     """Unified write. mode: create|update|append|upsert (default: upsert)."""
-    if not path:
-        return {"error": "path is required"}
-    note = VAULT_PATH / path
-    try:
-        note.resolve().relative_to(VAULT_PATH.resolve())
-    except ValueError:
-        return {"error": "Path traversal not allowed"}
-    if "_PRIVADO" in path:
-        return {"error": "Access denied: _PRIVADO/ is write-protected via MCP."}
+    note, err = vsec.resolve_under_vault(VAULT_PATH, path)
+    if err:
+        if "_PRIVADO" in err:
+            return {"error": "Access denied: _PRIVADO/ is write-protected via MCP."}
+        return {"error": err}
     if mode == "create":
         note.parent.mkdir(parents=True, exist_ok=True)
         if note.exists():
@@ -950,17 +1111,33 @@ def _edit_note(
     return {"edited": path, "replacements": replacements}
 
 
-def _move_note(source: str, destination: str) -> dict:
+def _move_note(source: str, destination: str, overwrite: bool = False) -> dict:
     if not source or not destination:
         return {"error": "source and destination are required"}
     for path in (source, destination):
         err = _note_path_error(path, write=True)
         if err:
             return err
-    src = VAULT_PATH / source
-    dst = VAULT_PATH / destination
+    src, src_err = vsec.resolve_under_vault(VAULT_PATH, source)
+    dst, dst_err = vsec.resolve_under_vault(VAULT_PATH, destination)
+    if src_err:
+        return {"error": src_err}
+    if dst_err:
+        return {"error": dst_err}
     if not src.exists():
         return {"error": f"Source not found: {source}"}
+    if not src.is_file():
+        return {"error": f"Source is not a file: {source}"}
+    if dst.exists():
+        if not overwrite:
+            return {
+                "error": (
+                    f"Destination already exists: {destination}. "
+                    "Pass overwrite=true to replace."
+                )
+            }
+        if dst.is_dir():
+            return {"error": f"Cannot overwrite directory: {destination}"}
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
     _mark_graph_stale()
@@ -968,10 +1145,12 @@ def _move_note(source: str, destination: str) -> dict:
 
 
 def _list_folder(path: str = "", stats: bool = False, recursive: bool = False) -> dict:
-    folder = VAULT_PATH / path if path else VAULT_PATH
-    if not folder.resolve().is_relative_to(VAULT_PATH.resolve()):
+    folder = (VAULT_PATH / path).resolve() if path else VAULT_PATH.resolve()
+    try:
+        folder.relative_to(VAULT_PATH.resolve())
+    except ValueError:
         return {"error": "Path traversal not allowed"}
-    if "_PRIVADO" in str(path):
+    if vsec.is_protected_resolved(VAULT_PATH, folder):
         return {"error": "Access denied: _PRIVADO/ contents are never exposed via MCP."}
     if not folder.exists():
         return {"error": f"Folder not found: {path}"}
@@ -979,7 +1158,7 @@ def _list_folder(path: str = "", stats: bool = False, recursive: bool = False) -
         files = []
         truncated = False
         for f in sorted(folder.rglob("*.md")):
-            if "_PRIVADO" in str(f) or f.name.startswith("."):
+            if f.name.startswith(".") or vsec.is_protected_resolved(VAULT_PATH, f.resolve()):
                 continue
             files.append({
                 "path": str(f.relative_to(VAULT_PATH)).replace("\\", "/"),
@@ -1117,7 +1296,7 @@ def _search_notes(query: str) -> dict:
                 "hint": "Refine query or use run_skill('vault-search', ...) / vault-find.",
             }
         rel = str(note.relative_to(VAULT_PATH))
-        if "_PRIVADO" in rel:
+        if vsec.is_protected_resolved(VAULT_PATH, note.resolve()):
             continue
         try:
             text = note.read_text(encoding="utf-8")
@@ -1267,7 +1446,11 @@ def dispatch_tool(name: str, args: dict) -> Any:
             int(args.get("expect_count", 1)),
             bool(args.get("replace_all", False)),
         ),
-        "move_note":            lambda: _move_note(args.get("source", ""), args.get("destination", "")),
+        "move_note":            lambda: _move_note(
+            args.get("source", ""),
+            args.get("destination", ""),
+            bool(args.get("overwrite", False)),
+        ),
 
         "search_notes":         lambda: _search_notes(args.get("query", "")),
         "get_current_datetime": lambda: _get_current_datetime(),
@@ -1512,13 +1695,14 @@ MCP_TOOLS = [
     {
         "name": "move_note",
         "title": "Move Note",
-        "description": "Move or rename a note within the vault.",
+        "description": "Move or rename a note within the vault. Fails if destination exists unless overwrite=true.",
         "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
         "inputSchema": {
             "type": "object",
             "properties": {
                 "source":      {"type": "string", "description": "Current vault-relative path"},
                 "destination": {"type": "string", "description": "Target vault-relative path"},
+                "overwrite":   {"type": "boolean", "description": "Replace destination if it exists (default false)"},
             },
             "required": ["source", "destination"],
             "additionalProperties": False,
@@ -1617,7 +1801,9 @@ def _err(msg_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
-def handle_mcp_message(body: dict, authenticated: bool = False) -> dict:
+def handle_mcp_message(body: Any, authenticated: bool = False) -> dict:
+    if not isinstance(body, dict):
+        return _err(None, -32600, "Invalid Request: message must be a JSON object")
     method = body.get("method", "")
     msg_id = body.get("id")
     params = body.get("params") or {}
@@ -1668,8 +1854,7 @@ def handle_mcp_message(body: dict, authenticated: bool = False) -> dict:
 WWW_AUTH = f'Bearer resource_metadata="{BASE_URL}/.well-known/oauth-protected-resource"'
 
 async def sse_endpoint(request: Request) -> Response:
-    token = get_bearer_token(request)
-    if token and not authenticate_request(request):
+    if not authenticate_request(request):
         return JSONResponse(
             {"error": "Unauthorized"},
             status_code=401,
@@ -1858,7 +2043,14 @@ async def mcp_streamable_endpoint(request: Request) -> Response:
     # Handle batch (array) or single request
     if isinstance(body, list):
         authenticated = authenticate_request(request)
-        responses = [r for msg in body if (r := handle_mcp_message(msg, authenticated=authenticated))]
+        responses: list[dict] = []
+        for msg in body:
+            if not isinstance(msg, dict):
+                responses.append(_err(None, -32600, "Invalid Request: batch items must be objects"))
+                continue
+            r = handle_mcp_message(msg, authenticated=authenticated)
+            if r:
+                responses.append(r)
         if not responses:
             empty_status = _response_status_for_empty_result(body)
             _json_log(
@@ -1875,6 +2067,8 @@ async def mcp_streamable_endpoint(request: Request) -> Response:
             return Response(status_code=empty_status)
         result = responses[0] if len(responses) == 1 else responses
     else:
+        if not isinstance(body, dict):
+            return JSONResponse(_err(None, -32600, "Invalid Request"), status_code=400)
         authenticated = authenticate_request(request)
         result = handle_mcp_message(body, authenticated=authenticated)
         if not result:
@@ -1915,15 +2109,40 @@ async def authorize_router(request: Request) -> Response:
 
 
 async def register_endpoint(request: Request) -> JSONResponse:
+    if not _rate_limit(request, "register"):
+        return JSONResponse({"error": "slow_down"}, status_code=429)
     try:
         body = await request.json()
     except Exception:
         body = {}
+    redirect_uris = body.get("redirect_uris") or []
+    if not isinstance(redirect_uris, list) or not redirect_uris:
+        return JSONResponse(
+            {"error": "invalid_client_metadata", "error_description": "redirect_uris required"},
+            status_code=400,
+        )
+    cleaned: list[str] = []
+    for uri in redirect_uris:
+        uri = str(uri).strip()
+        err = _validate_redirect_uri(uri)
+        if err:
+            return JSONResponse(
+                {"error": "invalid_redirect_uri", "error_description": f"{uri}: {err}"},
+                status_code=400,
+            )
+        cleaned.append(uri)
     client_id = secrets.token_urlsafe(16)
+    global oauth_clients
+    oauth_clients = _load_oauth_clients()
+    oauth_clients[client_id] = {
+        "redirect_uris": cleaned,
+        "created_at": time.time(),
+    }
+    _save_oauth_clients(oauth_clients)
     return JSONResponse({
         "client_id": client_id,
         "client_secret": "",
-        "redirect_uris": body.get("redirect_uris", []),
+        "redirect_uris": cleaned,
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",

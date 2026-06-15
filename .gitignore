@@ -5,3 +5,4 @@ __pycache__/
 .vault-graph-stale
 .PRIVADO/
 refresh_tokens.json
+oauth_clients.json

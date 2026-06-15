@@ -152,7 +152,7 @@ curl https://your-host/mcp-health   # behind nginx with X-Accel-Buffering off fo
 - nginx terminates TLS and proxies `/sse`, `/messages`, `/mcp`; set `X-Accel-Buffering: no` so SSE streams aren't buffered.
 - The OAuth metadata endpoints (`/.well-known/oauth-*`) make it a first-class connector for Claude.ai and ChatGPT developer mode.
 
-> Security note before you expose this publicly: review `redirect_uri` validation, lock `initialize` so it doesn't leak your system prompt to anonymous callers, and never ship the default `JWT_SECRET`. See `CASE-STUDY.md` for the war stories.
+> **Security (v0.2):** OAuth clients are persisted (`oauth_clients.json`). Redirect URIs are validated by exact match. PKCE is S256-only. Access tokens expire in 15 minutes (configurable). SSE requires authentication. Before exposing publicly, set strong secrets and register client redirect URIs via `POST /register` or `OAUTH_REDIRECT_URIS` in `.env`.
 
 ---
 
