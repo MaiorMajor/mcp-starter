@@ -59,12 +59,15 @@ Then point any MCP client at it with `Authorization: Bearer $MCP_API_KEY` (or th
 The server is vault-agnostic — it only assumes a top-level folder convention you can change. Defaults:
 
 ```
-00_inbox/        # immutable capture zone — read & promote, never edit in place
-10_work/ 20_studio/ 30_research/ 40_life/   # your content domains
-50_infra/        # the engine lives here: skills/, agents/
-99_meta/         # graph snapshot, changelog, rules
+inbox/           # immutable capture zone — read & promote, never edit in place
+work/            # active projects (add subfolders as you grow)
+personal/        # life admin
+research/        # reading & references
+meta/            # graph snapshot, changelog, rules
 _PRIVADO/        # blind to MCP — never listed, read, or written
 ```
+
+`mcp-starter init` scaffolds exactly this layout.
 
 1. Set `VAULT_PATH` in `.env`.
 2. Edit `skill_hints.json` in this repo → keywords that map to *your* folders and skills, so `vault-dispatch` knows where your topics live.
@@ -105,7 +108,7 @@ Each skill ships a `manifest.json` that registers a **real MCP tool** with `inpu
         ┌──────────────┴───────────────┐
         │  SSE /messages   Streamable /mcp │   ← dual transport, version-negotiated
         └──────────────┬───────────────┘
-                       │  OAuth 2.0 PKCE  ·  Bearer (static key or 30d JWT)
+                       │  OAuth 2.0 PKCE  ·  Bearer (static key or 15m access JWT)
         ┌──────────────▼───────────────────────────────────────┐
         │  mcp_starter.server  (Starlette + uvicorn)              │
         │  • 14 tools  • caps + truncation hints               │

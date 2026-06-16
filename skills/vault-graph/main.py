@@ -41,11 +41,16 @@ _vault_env = os.environ.get("VAULT_PATH") or os.environ.get("VAULT_ROOT")
 if not _vault_env:
     raise SystemExit("VAULT_PATH must be set in the environment.")
 VAULT_ROOT = Path(_vault_env)
-GRAPH_OUT = VAULT_ROOT / "99_meta" / "vault-graph.json"
-STALE_FLAG = VAULT_ROOT / "99_meta" / ".vault-graph-stale"
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from mcp_starter.vault_layout import GRAPH_JSON, GRAPH_STALE, INBOX, META  # noqa: E402
+
+GRAPH_OUT = VAULT_ROOT / GRAPH_JSON
+STALE_FLAG = VAULT_ROOT / GRAPH_STALE
 
 EXCLUDE_DIR_PARTS = {
-    "00_inbox/simplenote",
+    f"{INBOX}/.capture",
     "_PRIVADO",
     "__pycache__",
     ".obsidian",
@@ -55,8 +60,7 @@ EXCLUDE_DIR_PARTS = {
     "node_modules",
     ".cline",
     ".agents",
-    "99_meta/_archive",
-    "90_archive",
+    f"{META}/_archive",
 }
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
@@ -450,9 +454,9 @@ def q_find(idx: GraphIndex, args):
 
 
 def _schema_root_drift_count() -> int | None:
-    """Ficheiros à raiz de pastas não-folha (métrica anti-drift)."""
+    """Optional anti-drift metric when meta/routing-audit tooling is present."""
     try:
-        audit_dir = VAULT_ROOT / "50_infra" / "skills" / "vault" / "routing-audit"
+        audit_dir = VAULT_ROOT / META / "routing-audit"
         if not audit_dir.exists():
             return None
         sys.path.insert(0, str(audit_dir))

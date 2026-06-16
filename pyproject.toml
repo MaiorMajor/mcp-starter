@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-obsidian-starter"
-version = "1.14.0"
+version = "1.15.0"
 description = "Typed MCP server for Obsidian vaults with deterministic routing and example skills"
 readme = "README.md"
 license = { text = "MIT" }

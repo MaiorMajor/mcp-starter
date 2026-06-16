@@ -19,6 +19,10 @@ from pathlib import Path
 # ── Config ────────────────────────────────────────────────────────────────────
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from mcp_starter.vault_layout import CAPTURE_FALLBACK, META  # noqa: E402
 
 def _vault_root() -> Path:
     env = os.environ.get("VAULT_PATH") or os.environ.get("VAULT_ROOT")
@@ -27,7 +31,7 @@ def _vault_root() -> Path:
     raise SystemExit("VAULT_PATH must be set in the environment.")
 
 # Pastas excluídas do dispatch (não são destinos válidos para conteúdo)
-EXCLUDE_DESTINATIONS = {".git", ".obsidian", "99_meta", "_archive"}
+EXCLUDE_DESTINATIONS = {".git", ".obsidian", META, "_archive"}
 
 # Pastas que nunca devem ser sugeridas
 FORBIDDEN = {"_PRIVADO"}
@@ -292,7 +296,7 @@ def dispatch(query: str, index: list[dict], top: int = 3, vault: Path | None = N
 
     if not scored:
         fb = {
-            "destination": "00_inbox/",
+            "destination": CAPTURE_FALLBACK,
             "confidence": 0.0,
             "keywords_matched": [],
             "context_files": ["CONTEXT.md"],

@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from mcp_starter.paths import find_repo_root
+from mcp_starter.vault_layout import WEAK_OAUTH_PASSWORDS
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ class Settings:
     oauth_rate_limit: int
     oauth_rate_window: int
     allowed_origins: frozenset[str]
-    server_version: str = "1.14.0"
+    server_version: str = "1.15.0"
     default_protocol_version: str = "2025-11-25"
     supported_protocol_versions: tuple[str, ...] = (
         "2025-11-25",
@@ -50,8 +51,11 @@ def load_settings(*, require_vault: bool = True) -> Settings:
     if require_vault:
         if not jwt_secret.strip() or jwt_secret == "change-me-in-production":
             raise RuntimeError("JWT_SECRET must be set to a strong secret in production.")
-        if not oauth_password.strip():
-            raise RuntimeError("OAUTH_PASSWORD must be set in production.")
+        if oauth_password.strip() in WEAK_OAUTH_PASSWORDS:
+            raise RuntimeError(
+                "OAUTH_PASSWORD must be set to a strong secret in production "
+                "(run mcp-starter init or set a random password in .env)."
+            )
 
     return Settings(
         repo_root=repo_root,

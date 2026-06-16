@@ -1,6 +1,6 @@
 """Guard rails partilhados entre skills.
 
-Circuit breaker via ficheiro `50_infra/AGENT_PAUSE` no vault: se existir,
+Circuit breaker via ficheiro `meta/AGENT_PAUSE` no vault: se existir,
 qualquer skill que invoque `check_circuit_breaker()` aborta imediatamente
 com exit 0 (bloqueio é intencional, não é erro).
 """
@@ -11,10 +11,12 @@ VAULT_ROOT = os.environ.get("VAULT_PATH") or os.environ.get("VAULT_ROOT")
 if not VAULT_ROOT:
     VAULT_ROOT = ""
 
+AGENT_PAUSE_REL = os.path.join("meta", "AGENT_PAUSE")
+
 
 def is_paused(vault_root: str = VAULT_ROOT) -> tuple[bool, str]:
     """Devolve (paused, reason). Não levanta excepções — lê best-effort."""
-    flag = os.path.join(vault_root, "50_infra", "AGENT_PAUSE")
+    flag = os.path.join(vault_root, AGENT_PAUSE_REL)
     if not os.path.exists(flag):
         return False, ""
     try:

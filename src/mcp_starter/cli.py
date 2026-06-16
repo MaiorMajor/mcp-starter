@@ -10,6 +10,7 @@ from pathlib import Path
 
 from mcp_starter import __version__
 from mcp_starter.paths import find_repo_root
+from mcp_starter.vault_layout import INIT_DIRS
 
 ROUTER_TEMPLATE = """---
 title: Vault Router
@@ -55,7 +56,7 @@ Routing context for work-related notes. Add keywords and routing rows as your va
 ENV_TEMPLATE = """VAULT_PATH={vault_path}
 MCP_API_KEY={mcp_api_key}
 JWT_SECRET={jwt_secret}
-OAUTH_PASSWORD=change-me-before-exposing-publicly
+OAUTH_PASSWORD={oauth_password}
 MCP_BASE_URL=https://your-domain.com
 """
 
@@ -68,7 +69,7 @@ def cmd_init(vault_path: Path, force: bool) -> int:
         print(f"Vault not empty: {vault_path} (use --force to continue)", file=sys.stderr)
         return 1
 
-    for name in ("inbox", "work", "work/projects", "personal", "research", "meta", "_PRIVADO"):
+    for name in INIT_DIRS:
         (vault_path / name).mkdir(parents=True, exist_ok=True)
 
     router = vault_path / "_README.router.md"
@@ -86,6 +87,7 @@ def cmd_init(vault_path: Path, force: bool) -> int:
                 vault_path=vault_path,
                 mcp_api_key=secrets.token_hex(32),
                 jwt_secret=secrets.token_hex(32),
+                oauth_password=secrets.token_urlsafe(24),
             ),
             encoding="utf-8",
         )

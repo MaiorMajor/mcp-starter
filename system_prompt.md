@@ -30,7 +30,7 @@ Core guardrails (_PRIVADO blind, inbox immutable, confirm before bulk deletes) c
 
 - `read_note` / `search_notes` cover `.md` only. PDFs, docx, code, etc.: `find_files` (metadata) first.
 - **Structured JSON / JSONL:** `read_json` (schema-first: schema → list → get) or `read_jsonl` (line pagination). NEVER `read_note` on `.json`/`.jsonl` — truncates from the start and loses the tail.
-- Relational queries (backlinks, hubs, paths): `run_skill("vault-graph", ["query", "<subcmd>", ...])` — subcmd required. NEVER load `99_meta/vault-graph.json` into context.
+- Relational queries (backlinks, hubs, paths): `run_skill("vault-graph", ["query", "<subcmd>", ...])` — subcmd required. NEVER load `meta/vault-graph.json` into context.
 
 ## Writing notes
 

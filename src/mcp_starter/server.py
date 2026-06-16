@@ -64,6 +64,7 @@ from mcp_starter import vault_json_reader as vjr
 from mcp_starter import vault_security as vsec
 from mcp_starter.config import Settings, load_settings
 from mcp_starter.paths import find_repo_root
+from mcp_starter.vault_layout import AGENT_PAUSE, GRAPH_JSON, GRAPH_STALE, INBOX, META
 
 # ─── Configuration (populated by bootstrap()) ─────────────────────────────────
 
@@ -81,7 +82,7 @@ OAUTH_CLIENTS_FILE: Path
 OAUTH_RATE_LIMIT: int
 OAUTH_RATE_WINDOW: int
 ALLOWED_ORIGINS: frozenset[str]
-SERVER_VERSION: str = "1.14.0"
+SERVER_VERSION: str = "1.15.0"
 DEFAULT_PROTOCOL_VERSION: str = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (
     "2025-11-25",
@@ -781,9 +782,9 @@ async def oauth_protected_resource_endpoint(request: Request) -> JSONResponse:
 # ─── Vault tools ──────────────────────────────────────────────────────────────
 
 def _list_inbox() -> dict:
-    inbox = VAULT_PATH / "00_inbox"
+    inbox = VAULT_PATH / INBOX
     if not inbox.exists():
-        return {"error": "00_inbox folder not found", "files": []}
+        return {"error": f"{INBOX}/ folder not found", "files": []}
     files = []
     truncated = False
     for f in sorted(inbox.rglob("*.md")):
@@ -811,12 +812,10 @@ def _read_note(path: str) -> dict:
     note, err = vsec.resolve_under_vault(VAULT_PATH, path)
     if err:
         return {"error": err}
-    if path.endswith("vault-graph.json") or path.endswith("99_meta/vault-graph.json"):
-        return {"error": "vault-graph.json is ~800KB and would flood the context. Use run_skill('vault-graph', ['query', '<subcmd>', ...]) — subcmds: backlinks, forward, neighbors, hubs, orphans, tag, node, path, find, stats."}
+    if path.endswith("vault-graph.json") or path.endswith(GRAPH_JSON):
+        return {"error": f"{GRAPH_JSON} is large and would flood the context. Use run_skill('vault-graph', ['query', '<subcmd>', ...]) — subcmds: backlinks, forward, neighbors, hubs, orphans, tag, node, path, find, stats."}
     _BLOAT_WARN_PATHS = (
-        "99_meta/CHANGELOG.md",
-        "99_meta/MAP.md",
-        "50_infra/skills/_index.md",
+        f"{META}/CHANGELOG.md",
     )
     warn = None
     norm = path.replace("\\", "/")
@@ -905,7 +904,7 @@ def _mark_graph_stale() -> None:
     Cheap: just creates an empty file. The vault-graph skill checks this flag in main()
     and lazily regenerates the snapshot, then removes the flag."""
     try:
-        flag = VAULT_PATH / "99_meta" / ".vault-graph-stale"
+        flag = VAULT_PATH / Path(GRAPH_STALE)
         flag.parent.mkdir(parents=True, exist_ok=True)
         flag.touch()
     except OSError:
@@ -930,7 +929,7 @@ def _note_path_error(path: str, *, write: bool = False) -> dict | None:
         if write and "_PRIVADO" in err:
             return {"error": "Access denied: _PRIVADO/ is write-protected via MCP."}
         return {"error": err}
-    if path.endswith("vault-graph.json") or path.endswith("99_meta/vault-graph.json"):
+    if path.endswith("vault-graph.json") or path.endswith(GRAPH_JSON):
         return {
             "error": (
                 "vault-graph.json is large. Use run_skill('vault-graph', "
@@ -945,7 +944,7 @@ def _json_data_path_error(path: str) -> dict | None:
     _, err = vsec.resolve_under_vault(VAULT_PATH, path)
     if err:
         return {"error": err}
-    if path.endswith("vault-graph.json") or path.endswith("99_meta/vault-graph.json"):
+    if path.endswith("vault-graph.json") or path.endswith(GRAPH_JSON):
         return {
             "error": (
                 "vault-graph.json is large. Use run_skill('vault-graph', "
@@ -1392,7 +1391,7 @@ def _run_skill(skill: str, argv: Optional[list] = None) -> dict:
     if "/" in skill or ".." in skill:
         return {"error": "Invalid skill name"}
     # Circuit breaker: bloqueia execução de qualquer skill se existir AGENT_PAUSE
-    pause_flag = VAULT_PATH / "50_infra" / "AGENT_PAUSE"
+    pause_flag = VAULT_PATH / AGENT_PAUSE
     if pause_flag.exists():
         try:
             reason = pause_flag.read_text(encoding="utf-8").strip() or "sem motivo especificado"
@@ -1420,18 +1419,20 @@ def _run_skill(skill: str, argv: Optional[list] = None) -> dict:
     py = str(venv_py) if venv_py.exists() else sys.executable
     cmd = [py, str(skill_path)] + [str(a) for a in (argv or [])]
     env = _skill_subprocess_env()
+    proc: subprocess.Popen[str] | None = None
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=45,
             cwd=str(skill_path.parent),
             env=env,
             start_new_session=True,
         )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        stdout, stderr = proc.communicate(timeout=45)
+        stdout = stdout or ""
+        stderr = stderr or ""
         stdout, stdout_trunc = _truncate_text(stdout, RUN_SKILL_STDOUT_MAX, _SKILL_TRUNCATE_SUFFIX)
         stderr, stderr_trunc = _truncate_text(stderr, RUN_SKILL_STDOUT_MAX, _SKILL_TRUNCATE_SUFFIX)
         out: dict[str, Any] = {
@@ -1445,12 +1446,12 @@ def _run_skill(skill: str, argv: Optional[list] = None) -> dict:
         if stderr_trunc:
             out["stderr_truncated"] = True
         return out
-    except subprocess.TimeoutExpired as exc:
-        if exc.pid:
+    except subprocess.TimeoutExpired:
+        if proc is not None:
             try:
-                os.killpg(os.getpgid(exc.pid), signal.SIGKILL)
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, OSError):
-                pass
+                proc.kill()
         return {"error": f"Skill '{skill}' timed out after 45s"}
     except Exception as e:
         return {"error": str(e)}
@@ -1556,7 +1557,7 @@ BASE_MCP_TOOLS = [
             "path='': vault root. stats=true: mtime/ctime/size. "
             "Non-recursive: all entry types with ext on files (.pdf, .py, …). "
             "recursive=true: all .md under path (capped ~200; use find_files for PDFs/binaries). "
-            "Avoid recursive on 00_inbox — token-heavy."
+            f"Avoid recursive on {INBOX}/ — token-heavy."
         ),
         "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
         "inputSchema": {
@@ -1616,7 +1617,7 @@ BASE_MCP_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Vault-relative path (e.g. 99_meta/PROFILE.md)"},
+                "path": {"type": "string", "description": "Vault-relative path (e.g. meta/PROFILE.md)"},
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -1634,7 +1635,7 @@ BASE_MCP_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Vault-relative path (e.g. 50_infra/skills/meta/vault-graph/AGENT.md)"},
+                "path": {"type": "string", "description": "Vault-relative path (e.g. work/projects/my-app/AGENT.md)"},
             },
             "required": ["path"],
             "additionalProperties": False,

@@ -23,7 +23,7 @@ TYPE_EXTENSIONS: dict[str, set[str]] = {
 }
 
 FORBIDDEN_DIRS = {"_PRIVADO", ".git", "node_modules", "__pycache__", ".venv", ".cache", ".obsidian"}
-FORBIDDEN_PATHS = ("00_inbox/simplenote",)
+FORBIDDEN_PATHS: tuple[str, ...] = ()
 
 FIND_FILES_DEFAULT_LIMIT = 100
 FIND_FILES_MCP_MAX = 100
