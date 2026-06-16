@@ -150,3 +150,56 @@ def skill_dir_for(manifests: list[SkillManifest], tool_name: str) -> str | None:
         if m.name == tool_name:
             return m.skill_dir
     return None
+
+
+def _validate_value(value: Any, schema: dict[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    expected_type = schema.get("type")
+    if expected_type == "string":
+        if not isinstance(value, str):
+            errors.append(f"{path}: expected string")
+    elif expected_type == "integer":
+        if not isinstance(value, int) or isinstance(value, bool):
+            errors.append(f"{path}: expected integer")
+        else:
+            if "minimum" in schema and value < schema["minimum"]:
+                errors.append(f"{path}: must be >= {schema['minimum']}")
+            if "maximum" in schema and value > schema["maximum"]:
+                errors.append(f"{path}: must be <= {schema['maximum']}")
+    elif expected_type == "boolean":
+        if not isinstance(value, bool):
+            errors.append(f"{path}: expected boolean")
+    elif expected_type == "object":
+        if not isinstance(value, dict):
+            errors.append(f"{path}: expected object")
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: must be one of {schema['enum']}")
+    return errors
+
+
+def validate_tool_args(schema: dict[str, Any], args: dict[str, Any] | None) -> list[str]:
+    """Validate MCP tool arguments against manifest inputSchema (subset of JSON Schema)."""
+    if schema.get("type") != "object":
+        return []
+    payload = args or {}
+    if not isinstance(payload, dict):
+        return ["arguments must be a JSON object"]
+
+    errors: list[str] = []
+    properties = dict(schema.get("properties") or {})
+
+    if schema.get("additionalProperties") is False:
+        extra = sorted(set(payload) - set(properties))
+        if extra:
+            errors.append(f"unknown properties: {', '.join(extra)}")
+
+    for required in schema.get("required") or []:
+        if required not in payload:
+            errors.append(f"missing required field: {required}")
+
+    for key, prop_schema in properties.items():
+        if key not in payload:
+            continue
+        errors.extend(_validate_value(payload[key], prop_schema, key))
+
+    return errors

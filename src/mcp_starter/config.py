@@ -4,11 +4,38 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
 from mcp_starter.paths import find_repo_root
 from mcp_starter.vault_layout import WEAK_OAUTH_PASSWORDS
+
+_KNOWN_MCP_CLIENT_ORIGINS = (
+    "https://claude.ai",
+    "https://chatgpt.com",
+    "http://127.0.0.1:6274",
+    "http://localhost:6274",
+)
+
+
+def default_allowed_origins(base_url: str) -> frozenset[str]:
+    parsed = urlparse(base_url)
+    if parsed.scheme and parsed.netloc:
+        server_origin = f"{parsed.scheme}://{parsed.netloc}"
+    else:
+        server_origin = base_url.rstrip("/")
+    return frozenset({server_origin, *_KNOWN_MCP_CLIENT_ORIGINS})
+
+
+def parse_allowed_origins(base_url: str) -> frozenset[str] | None:
+    """Return None to allow any Origin; otherwise a restrictive frozenset."""
+    raw = os.getenv("MCP_ALLOWED_ORIGINS")
+    if raw is None or not raw.strip():
+        return default_allowed_origins(base_url)
+    if raw.strip() == "*":
+        return None
+    return frozenset(o.strip() for o in raw.split(",") if o.strip())
 
 
 @dataclass(frozen=True)
@@ -25,8 +52,8 @@ class Settings:
     oauth_clients_file: Path
     oauth_rate_limit: int
     oauth_rate_window: int
-    allowed_origins: frozenset[str]
-    server_version: str = "1.15.1"
+    allowed_origins: frozenset[str] | None
+    server_version: str = "1.16.0"
     default_protocol_version: str = "2025-11-25"
     supported_protocol_versions: tuple[str, ...] = (
         "2025-11-25",
@@ -57,13 +84,15 @@ def load_settings(*, require_vault: bool = True) -> Settings:
                 "(run mcp-starter init or set a random password in .env)."
             )
 
+    base_url = os.getenv("MCP_BASE_URL", "https://your-domain.com").rstrip("/")
+
     return Settings(
         repo_root=repo_root,
         vault_path=Path(vault_raw) if vault_raw else Path("/tmp"),
         mcp_api_key=os.getenv("MCP_API_KEY", ""),
         oauth_password=oauth_password,
         jwt_secret=jwt_secret,
-        base_url=os.getenv("MCP_BASE_URL", "https://your-domain.com").rstrip("/"),
+        base_url=base_url,
         skills_root=repo_root / "skills",
         access_token_ttl=int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "900")),
         refresh_token_ttl=int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(30 * 24 * 3600))),
@@ -72,7 +101,5 @@ def load_settings(*, require_vault: bool = True) -> Settings:
         ),
         oauth_rate_limit=int(os.getenv("OAUTH_RATE_LIMIT", "30")),
         oauth_rate_window=int(os.getenv("OAUTH_RATE_WINDOW_SECONDS", "300")),
-        allowed_origins=frozenset(
-            o.strip() for o in os.getenv("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()
-        ),
+        allowed_origins=parse_allowed_origins(base_url),
     )

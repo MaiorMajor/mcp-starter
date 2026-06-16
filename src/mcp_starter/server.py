@@ -81,8 +81,8 @@ REFRESH_TOKEN_TTL: int
 OAUTH_CLIENTS_FILE: Path
 OAUTH_RATE_LIMIT: int
 OAUTH_RATE_WINDOW: int
-ALLOWED_ORIGINS: frozenset[str]
-SERVER_VERSION: str = "1.15.1"
+ALLOWED_ORIGINS: frozenset[str] | None
+SERVER_VERSION: str = "1.16.0"
 DEFAULT_PROTOCOL_VERSION: str = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (
     "2025-11-25",
@@ -405,7 +405,7 @@ def negotiate_protocol_version(requested: str) -> tuple[str, str | None]:
 
 def _validate_transport_request(request: Request) -> JSONResponse | None:
     origin = request.headers.get("origin")
-    if origin and ALLOWED_ORIGINS and origin not in ALLOWED_ORIGINS:
+    if origin and ALLOWED_ORIGINS is not None and origin not in ALLOWED_ORIGINS:
         return JSONResponse({"error": "Forbidden origin"}, status_code=403)
     protocol = request.headers.get("mcp-protocol-version")
     if protocol and protocol not in SUPPORTED_PROTOCOL_VERSIONS:
@@ -1465,6 +1465,9 @@ def _dispatch_typed_skill(tool_name: str, args: dict) -> Any:
     manifest = SKILL_MANIFEST_BY_NAME.get(tool_name)
     if manifest is None:
         return {"error": f"Unknown typed skill tool: {tool_name}"}
+    validation_errors = skill_registry.validate_tool_args(manifest.input_schema, args or {})
+    if validation_errors:
+        return {"error": "Invalid arguments: " + "; ".join(validation_errors)}
     try:
         argv = skill_registry.args_to_argv(manifest, args or {})
     except ValueError as exc:
@@ -1888,7 +1891,7 @@ def _err(msg_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
-def handle_mcp_message(body: Any, authenticated: bool = False) -> dict:
+async def handle_mcp_message(body: Any, authenticated: bool = False) -> dict:
     if not isinstance(body, dict):
         return _err(None, -32600, "Invalid Request: message must be a JSON object")
     method = body.get("method", "")
@@ -1917,7 +1920,7 @@ def handle_mcp_message(body: Any, authenticated: bool = False) -> dict:
     if method == "tools/call":
         tool_name = params.get("name", "")
         tool_args = params.get("arguments") or {}
-        result = dispatch_tool(tool_name, tool_args)
+        result = await asyncio.to_thread(dispatch_tool, tool_name, tool_args)
         _log_tool_call(tool_name, result)
         payload = {
             "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
@@ -2028,7 +2031,7 @@ async def messages_endpoint(request: Request) -> JSONResponse:
         )
 
     authenticated = authenticate_request(request)
-    response = handle_mcp_message(body, authenticated=authenticated)
+    response = await handle_mcp_message(body, authenticated=authenticated)
 
     session_id = request.query_params.get("session_id", "")
     queue = _sse_queues.get(session_id)
@@ -2159,7 +2162,7 @@ async def mcp_streamable_endpoint(request: Request) -> Response:
         return JSONResponse(_err(None, -32600, "Invalid Request"), status_code=400)
 
     authenticated = authenticate_request(request)
-    result = handle_mcp_message(body, authenticated=authenticated)
+    result = await handle_mcp_message(body, authenticated=authenticated)
     if not result:
         empty_status = _response_status_for_empty_result(body)
         _json_log(

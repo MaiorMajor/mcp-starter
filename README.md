@@ -2,13 +2,15 @@
 
 > Turn any Obsidian vault (or plain markdown folder) into a typed, agent-native second brain — served over the Model Context Protocol, with deterministic routing that spends **zero LLM tokens** to decide where things go.
 
-[![status](https://img.shields.io/badge/status-starter-success)]()
+[![status](https://img.shields.io/badge/status-public%20beta-1.16.0-success)](https://github.com/MaiorMajor/mcp-starter/releases)
 [![protocol](https://img.shields.io/badge/MCP-2025--11--25-blue)](https://modelcontextprotocol.io)
 [![python](https://img.shields.io/badge/python-3.11+-3776ab)](https://www.python.org)
 [![transport](https://img.shields.io/badge/transport-SSE%20%2B%20Streamable%20HTTP-orange)]()
 [![license](https://img.shields.io/badge/license-MIT-lightgrey)]()
 
 This is the open-source skeleton of an MCP server that has been running in production for **6 months**. This repo ships **14 core MCP tools** plus **3 typed skill tools** (`vault_dispatch`, `vault_find`, `vault_graph`) — the same architecture scales to dozens of typed skills over a real Obsidian vault.
+
+**Current release:** [v1.16.0](https://github.com/MaiorMajor/mcp-starter/releases/latest) (public beta). See [CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
@@ -148,7 +150,7 @@ curl https://your-host/mcp-health   # behind nginx with X-Accel-Buffering off fo
 - nginx terminates TLS and proxies `/sse`, `/messages`, `/mcp`; set `X-Accel-Buffering: no` so SSE streams aren't buffered.
 - The OAuth metadata endpoints (`/.well-known/oauth-*`) make it a first-class connector for Claude.ai and ChatGPT developer mode.
 
-> **Security (v0.2):** OAuth clients are persisted (`oauth_clients.json`). Redirect URIs are validated by exact match. PKCE is S256-only. Access tokens expire in 15 minutes (configurable). SSE requires authentication. Before exposing publicly, set strong secrets and register client redirect URIs via `POST /register` or `OAUTH_REDIRECT_URIS` in `.env`.
+> **Security (v1.16):** OAuth clients are persisted (`oauth_clients.json`). Redirect URIs are validated by exact match. PKCE is S256-only. Access tokens expire in 15 minutes (configurable). SSE requires authentication. By default `MCP_ALLOWED_ORIGINS` is restrictive (your `MCP_BASE_URL` + known MCP clients); set `MCP_ALLOWED_ORIGINS=*` for local dev. Before exposing publicly, set strong secrets and register client redirect URIs via `POST /register` or `OAUTH_REDIRECT_URIS` in `.env`.
 
 ---
 
