@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mcp-obsidian-starter"
+name = "agentvault"
 version = "1.16.0"
-description = "AgentVault: a bounded, deterministic MCP runtime for Obsidian and Markdown knowledge bases"
+description = "A bounded, deterministic MCP runtime for Obsidian and Markdown knowledge bases"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -47,13 +47,13 @@ dev = [
 ]
 
 [project.scripts]
-mcp-starter = "mcp_starter.cli:main"
+agentvault = "mcp_starter.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/MaiorMajor/mcp-starter"
-Repository = "https://github.com/MaiorMajor/mcp-starter"
-Documentation = "https://github.com/MaiorMajor/mcp-starter#readme"
-Changelog = "https://github.com/MaiorMajor/mcp-starter/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/MaiorMajor/agentvault"
+Repository = "https://github.com/MaiorMajor/agentvault"
+Documentation = "https://github.com/MaiorMajor/agentvault#readme"
+Changelog = "https://github.com/MaiorMajor/agentvault/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]
