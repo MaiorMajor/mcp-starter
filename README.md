@@ -2,15 +2,15 @@
 
 > Turn any Obsidian vault (or plain markdown folder) into a typed, agent-native second brain — served over the Model Context Protocol, with deterministic routing that spends **zero LLM tokens** to decide where things go.
 
-[![status](https://img.shields.io/badge/status-public%20beta-1.16.0-success)](https://github.com/MaiorMajor/mcp-starter/releases)
+![status](https://img.shields.io/badge/status-public%20beta-1.16.0-success)
 [![protocol](https://img.shields.io/badge/MCP-2025--11--25-blue)](https://modelcontextprotocol.io)
 [![python](https://img.shields.io/badge/python-3.11+-3776ab)](https://www.python.org)
-[![transport](https://img.shields.io/badge/transport-SSE%20%2B%20Streamable%20HTTP-orange)]()
-[![license](https://img.shields.io/badge/license-MIT-lightgrey)]()
+![transport](https://img.shields.io/badge/transport-SSE%20%2B%20Streamable%20HTTP-orange)
+[![license](https://img.shields.io/badge/license-MIT-lightgrey)](./LICENSE)
 
 This is the open-source skeleton of an MCP server that has been running in production for **6 months**. This repo ships **14 core MCP tools** plus **3 typed skill tools** (`vault_dispatch`, `vault_find`, `vault_graph`) — the same architecture scales to dozens of typed skills over a real Obsidian vault.
 
-**Current release:** [v1.16.0](https://github.com/MaiorMajor/mcp-starter/releases/latest) (public beta). See [CHANGELOG.md](./CHANGELOG.md).
+**Current version:** `v1.16.0` (public beta). See [CHANGELOG.md](./CHANGELOG.md). GitHub releases are available on the [Releases page](https://github.com/MaiorMajor/mcp-starter/releases).
 
 ---
 
