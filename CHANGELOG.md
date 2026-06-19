@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Repositioned the project under the **AgentVault** product name: a bounded, deterministic MCP runtime for Obsidian and Markdown knowledge bases.
+- Rewrote the README around the user problem, target audience, product boundary and local-first evaluation flow.
+- Separated local evaluation from production deployment requirements.
+- Clarified that the public repository contains the reusable runtime and three representative skills, not the author's private 47-skill deployment.
+- Corrected the source-of-truth model: the vault owns content; the repository owns runtime behaviour, skills, routing hints and the system prompt.
+- Reframed “zero-token routing” as deterministic routing for explicit taxonomies rather than a replacement for model reasoning.
+- Updated package metadata and discovery keywords while retaining the existing package and CLI names for compatibility.
+
 ## [1.16.0] — 2026-06-16
 
 ### Added
